@@ -7,6 +7,7 @@ merging them teaches the model to filter on a field the API rejects.
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any, Literal, get_args
 
 from fastmcp import FastMCP
@@ -26,7 +27,7 @@ from plane.models.work_items import (
     WorkItemDetail,
     WorkItemSearch,
 )
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from plane_mcp.client import get_plane_client_context
 from plane_mcp.pql_reference import PQL_FIELD_HINT
@@ -72,6 +73,16 @@ WRITE_FIELDS = (
     "external_id",
 )
 QUERY_FIELDS = ("order_by", "per_page", "cursor", "expand", "fields", "external_id", "external_source")
+SELF_HOSTED_MAX_PER_PAGE = 1000
+
+
+class SelfHostedWorkItemQueryParams(WorkItemQueryParams):
+    """Plane Community accepts 1000 although the SDK currently caps this field at 100."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    per_page: int | None = Field(None, ge=1, le=SELF_HOSTED_MAX_PER_PAGE)
+
 
 ACTIONS = (
     Action(
@@ -88,6 +99,18 @@ ACTIONS = (
             "filters one Plane API page to the authenticated user's tasks and optionally to state_id; "
             "stop when filter_complete=true and request next_cursor only when filter_complete=false. "
             "Without assignee_id, resolving the authenticated user costs one additional API request"
+        ),
+        read=True,
+    ),
+    Action(
+        "list_my_cards",
+        ("state_name",),
+        ("project_id", "project_identifier", "assignee_id", "order_by", "expand", "fields"),
+        note=(
+            "preferred for natural-language requests for my cards/tasks in a board column. "
+            "Pass the spoken column name directly (for example Спринт or В работе); this action scans only real "
+            "pages, returns all matches with human identifiers such as DEVTELE-1278, and needs no project, state, "
+            "cycle, or PQL discovery when PLANE_DEFAULT_PROJECT_ID and PLANE_DEFAULT_PROJECT_IDENTIFIER are set"
         ),
         read=True,
     ),
@@ -212,7 +235,13 @@ def _related_id(value: Any) -> str | None:
     return getattr(value, "id", None)
 
 
-def _mine_on_page(items: Any, assignee_id: str, state_id: str) -> list[Any]:
+def _related_name(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("name")
+    return getattr(value, "name", None)
+
+
+def _mine_on_page(items: Any, assignee_id: str, state_id: str, state_name: str = "") -> list[Any]:
     """Filter one Plane page without issuing a retrieve call per work item."""
     matches = []
     for item in items or []:
@@ -221,8 +250,27 @@ def _mine_on_page(items: Any, assignee_id: str, state_id: str) -> list[Any]:
             continue
         if state_id and _related_id(getattr(item, "state", None)) != state_id:
             continue
+        if state_name and (_related_name(getattr(item, "state", None)) or "").casefold() != state_name.casefold():
+            continue
         matches.append(item)
     return matches
+
+
+def _project_identifier(item: Any, fallback: str) -> str:
+    project = getattr(item, "project", None)
+    if isinstance(project, dict):
+        return project.get("identifier") or fallback
+    return getattr(project, "identifier", None) or fallback
+
+
+def _dump_my_cards(items: list[Any], fields: str, project_identifier: str) -> list[Any]:
+    dumped = dump_results(items, opt(fields))
+    for item, result in zip(items, dumped, strict=True):
+        sequence_id = getattr(item, "sequence_id", None)
+        identifier = _project_identifier(item, project_identifier)
+        if isinstance(result, dict) and identifier and sequence_id is not None:
+            result["identifier"] = f"{identifier}-{sequence_id}"
+    return dumped
 
 
 def register(mcp: FastMCP) -> None:
@@ -235,6 +283,7 @@ def register(mcp: FastMCP) -> None:
         action: Literal[
             "list",
             "list_mine",
+            "list_my_cards",
             "list_archived",
             "retrieve",
             "retrieve_by_identifier",
@@ -254,6 +303,8 @@ def register(mcp: FastMCP) -> None:
         pql: Annotated[str, Field(description=PQL_FIELD_HINT)] = "",
         assignee_id: str = "",
         state_id: str = "",
+        state_name: str = "",
+        project_identifier: str = "",
         group_by: str = "",
         sub_group_by: str = "",
         name: str = "",
@@ -323,15 +374,63 @@ def register(mcp: FastMCP) -> None:
                 "estimate_point": opt(estimate_point),
             }
 
-        if action in ("list", "list_mine", "list_archived"):
+        if action in ("list", "list_mine", "list_my_cards", "list_archived"):
             if action == "list_archived" and not project_id:
                 return missing(action, "project_id")
             if action == "list_mine" and not project_id:
                 return missing(action, "project_id")
-            if action == "list_mine":
+            if action == "list_my_cards":
+                if not state_name:
+                    return missing(action, "state_name")
+                project_id = project_id or os.getenv("PLANE_DEFAULT_PROJECT_ID", "")
+                project_identifier = project_identifier or os.getenv("PLANE_DEFAULT_PROJECT_IDENTIFIER", "")
+                if not project_id:
+                    return "Error: list_my_cards needs project_id or PLANE_DEFAULT_PROJECT_ID."
+                if not project_identifier:
+                    return "Error: list_my_cards needs project_identifier or PLANE_DEFAULT_PROJECT_IDENTIFIER."
+            if action in ("list_mine", "list_my_cards"):
+                assignee_id = assignee_id or os.getenv("PLANE_CURRENT_USER_ID", "")
                 assignee_id = assignee_id or client.users.get_me().id or ""
                 if not assignee_id:
                     return "Error: Plane returned the authenticated user without an id."
+            if action == "list_my_cards":
+                required_fields = ("assignees", "state", "sequence_id", "project")
+                request_fields = _with_fields(fields, *required_fields) if fields else fields
+                request_expand = _with_fields(expand, "assignees", "state", "project")
+                matches: list[Any] = []
+                page_cursor = ""
+                seen_cursors: set[str] = set()
+                pages_scanned = 0
+                while True:
+                    response = client.work_items.list(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        params=SelfHostedWorkItemQueryParams(
+                            order_by=opt(order_by),
+                            per_page=SELF_HOSTED_MAX_PER_PAGE,
+                            cursor=opt(page_cursor),
+                            expand=opt(request_expand),
+                            fields=opt(request_fields),
+                        ),
+                    )
+                    pages_scanned += 1
+                    matches.extend(_mine_on_page(response.results, assignee_id, "", state_name))
+                    if not bool(response.next_page_results):
+                        break
+                    next_cursor = response.next_cursor
+                    if not next_cursor or next_cursor in seen_cursors:
+                        raise RuntimeError("Plane reported another work-item page without a usable new cursor.")
+                    seen_cursors.add(next_cursor)
+                    page_cursor = next_cursor
+                return {
+                    "results": _dump_my_cards(matches, fields, project_identifier),
+                    "count": len(matches),
+                    "filter_complete": True,
+                    "pages_scanned": pages_scanned,
+                    "assignee_id": assignee_id,
+                    "state_name": state_name,
+                    "project_identifier": project_identifier,
+                }
             request_fields = fields
             request_expand = expand
             if action == "list_mine":

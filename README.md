@@ -7,7 +7,7 @@ work items, cycles, modules, releases, customers and more.
 Built on [FastMCP](https://github.com/jlowin/fastmcp) and the official
 [`plane-sdk`](https://pypi.org/project/plane-sdk/).
 
-- **30 tools**, one per Plane resource, covering 205 operations
+- **30 tools**, one per Plane resource, covering 206 operations
 - **Local or remote** — stdio, streamable HTTP, SSE
 - **OAuth or API key** authentication
 
@@ -123,28 +123,47 @@ workitem(action="count", pql='assignees__id = "<member id>"', group_by="state_id
 
 Call `get_pql_reference` for the full syntax, operators and worked examples.
 
-#### Authenticated user's work items on self-hosted Plane
+#### Authenticated user's board cards on self-hosted Plane
 
 Some self-hosted Plane versions do not apply PQL or structured assignee/state
-filters to list requests. Use `list_mine` when that is the case:
+filters to list requests. For a natural-language request such as “show my cards
+in Sprint”, configure a default project and use `list_my_cards`:
 
 ```python
 workitem(
-    action="list_mine",
-    project_id="<project id>",
-    state_id="<column/state id>",
-    per_page=100,
+    action="list_my_cards",
+    state_name="Sprint",
 )
 ```
 
-`list_mine` filters the returned API page locally by the authenticated user and,
-when supplied, `state_id`. Stop as soon as `filter_complete` is `true`; at that
-point `next_cursor` is `null`, including when Plane returned a synthetic cursor
-for its last page. Request `next_cursor` only when `filter_complete` is `false`.
+`list_my_cards` treats the supplied name as a workflow column, never as a cycle.
+It requests 1,000 cards per page (the self-hosted server's actual limit), scans
+only pages that Plane marks as real, aggregates all matches in one MCP call, and
+adds human-readable identifiers such as `DEVTELE-1278`. Configure:
+
+```json
+{
+  "PLANE_DEFAULT_PROJECT_ID": "<project UUID>",
+  "PLANE_DEFAULT_PROJECT_IDENTIFIER": "DEVTELE",
+  "PLANE_CURRENT_USER_ID": "<member UUID>"
+}
+```
+
+`PLANE_CURRENT_USER_ID` is appropriate for a single-user stdio server. Omit it
+on a shared server; the action then resolves the authenticated user itself.
+Without project defaults, pass `project_id` and `project_identifier` directly.
+
+The lower-level `list_mine` action filters one returned API page by
+`assignee_id` and optional `state_id`. Stop as soon as `filter_complete` is
+`true`; request `next_cursor` only when it is `false`.
 
 Without `assignee_id`, the first call makes one request to identify the current
 user and one request to list a page. Passing a known `assignee_id` avoids the
-profile request. Each real additional page requires one more list request.
+profile request. `list_my_cards` uses one list request per 1,000 project cards
+and never requests a page for Plane's synthetic last-page cursor. Plane
+Community does not currently provide server-side assignee/state filtering on
+this endpoint, so these page reads are the minimum required for a complete
+answer.
 
 ### Upgrading from the per-operation tools
 
@@ -168,6 +187,9 @@ unchanged.
 | `PLANE_API_KEY` | stdio | API key |
 | `PLANE_WORKSPACE_SLUG` | stdio | Target workspace |
 | `PLANE_BASE_URL` | optional | Plane API URL (default `https://api.plane.so`) |
+| `PLANE_DEFAULT_PROJECT_ID` | optional | Default project UUID for `workitem list_my_cards` |
+| `PLANE_DEFAULT_PROJECT_IDENTIFIER` | optional | Human prefix, such as `DEVTELE`, for returned card identifiers |
+| `PLANE_CURRENT_USER_ID` | optional | Current member UUID for a single-user stdio server; avoids a profile request |
 
 The remote transports carry credentials in the connection — the OAuth flow or the
 PAT headers — and need none of these.

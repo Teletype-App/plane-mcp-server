@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from plane.errors.errors import HttpError
+from plane.models.states import StateLite
 from plane.models.users import UserLite
 from plane.models.work_items import WorkItem
 
@@ -83,6 +84,94 @@ def test_list_mine_description_tells_agents_when_to_stop(registered):
 
     assert "stop when filter_complete=true" in description
     assert "request next_cursor only when filter_complete=false" in description
+
+
+def test_list_my_cards_uses_configured_defaults_and_returns_human_identifiers(registered, spy, monkeypatch):
+    monkeypatch.setenv("PLANE_DEFAULT_PROJECT_ID", "project-1")
+    monkeypatch.setenv("PLANE_DEFAULT_PROJECT_IDENTIFIER", "DEVTELE")
+    monkeypatch.setenv("PLANE_CURRENT_USER_ID", "me")
+    spy.returns["work_items.list"] = _page(
+        WorkItem(
+            id="mine", name="Mine", sequence_id=1278, state=StateLite(name="Спринт"), assignees=[UserLite(id="me")]
+        ),
+        WorkItem(
+            id="theirs",
+            name="Theirs",
+            sequence_id=1279,
+            state=StateLite(name="Спринт"),
+            assignees=[UserLite(id="other")],
+        ),
+        WorkItem(
+            id="started",
+            name="Started",
+            sequence_id=1280,
+            state=StateLite(name="В работе"),
+            assignees=[UserLite(id="me")],
+        ),
+    )
+
+    result = registered["workitem"].fn(action="list_my_cards", state_name="спринт")
+
+    assert spy.recorder.methods == ["work_items.list"]
+    assert spy.recorder.only().kwargs["params"].per_page == 1000
+    assert result["count"] == 1
+    assert result["results"][0]["identifier"] == "DEVTELE-1278"
+    assert result["filter_complete"] is True
+    assert result["pages_scanned"] == 1
+
+
+def test_list_my_cards_reads_only_pages_that_plane_marks_as_real(registered, spy):
+    first = _page(
+        WorkItem(id="first", sequence_id=1, state=StateLite(name="В работе"), assignees=[UserLite(id="me")]),
+        next_cursor="100:1:0",
+        next_page_results=True,
+    )
+    last = _page(
+        WorkItem(id="last", sequence_id=2, state=StateLite(name="В работе"), assignees=[UserLite(id="me")]),
+        next_cursor="100:2:0",
+        next_page_results=False,
+    )
+
+    class Pages:
+        def __init__(self):
+            self.pages = [first, last]
+            self.index = 0
+
+        @property
+        def results(self):
+            return self.pages[self.index].results
+
+        @property
+        def next_page_results(self):
+            return self.pages[self.index].next_page_results
+
+        @property
+        def next_cursor(self):
+            cursor = self.pages[self.index].next_cursor
+            self.index += 1
+            return cursor
+
+    spy.returns["work_items.list"] = Pages()
+
+    result = registered["workitem"].fn(
+        action="list_my_cards",
+        state_name="В работе",
+        project_id="project-1",
+        project_identifier="DEVTELE",
+        assignee_id="me",
+    )
+
+    assert spy.recorder.methods == ["work_items.list", "work_items.list"]
+    assert [item["identifier"] for item in result["results"]] == ["DEVTELE-1", "DEVTELE-2"]
+    assert result["pages_scanned"] == 2
+
+
+def test_server_instructions_route_russian_board_requests_directly():
+    from plane_mcp.instructions import SERVER_INSTRUCTIONS
+
+    assert "мои задачи/карточки со спринта" in SERVER_INSTRUCTIONS
+    assert "workitem list_my_cards" in SERVER_INSTRUCTIONS
+    assert "not a Plane cycle" in SERVER_INSTRUCTIONS
 
 
 def test_explicit_assignee_avoids_a_profile_request(registered, spy):
