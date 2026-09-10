@@ -30,14 +30,14 @@ def test_cycle_list_falls_back_when_cycles_lite_is_missing(registered, spy):
     assert spy.recorder.calls[-1].kwargs["params"].status == "current"
 
 
-def _page(*items):
+def _page(*items, next_cursor=None, next_page_results=False):
     return SimpleNamespace(
         results=list(items),
         total_count=len(items),
         count=len(items),
-        next_cursor=None,
+        next_cursor=next_cursor,
         prev_cursor=None,
-        next_page_results=False,
+        next_page_results=next_page_results,
         prev_page_results=False,
     )
 
@@ -56,6 +56,26 @@ def test_list_mine_returns_only_matching_items_without_per_item_calls(registered
     assert result["count"] == 1
     assert result["filter_complete"] is True
     assert result["assignee_id"] == "me"
+
+
+def test_list_mine_ignores_a_synthetic_cursor_when_plane_says_there_is_no_next_page(registered, spy):
+    spy.returns["work_items.list"] = _page(next_cursor="100:1:0", next_page_results=False)
+
+    result = registered["workitem"].fn(action="list_mine", project_id="project-1", assignee_id="me")
+
+    assert result["filter_complete"] is True
+    assert result["next_cursor"] is None
+    assert result["next_page_results"] is False
+
+
+def test_list_mine_keeps_a_cursor_only_when_plane_reports_another_page(registered, spy):
+    spy.returns["work_items.list"] = _page(next_cursor="100:1:0", next_page_results=True)
+
+    result = registered["workitem"].fn(action="list_mine", project_id="project-1", assignee_id="me")
+
+    assert result["filter_complete"] is False
+    assert result["next_cursor"] == "100:1:0"
+    assert result["next_page_results"] is True
 
 
 def test_explicit_assignee_avoids_a_profile_request(registered, spy):

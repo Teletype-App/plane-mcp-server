@@ -368,9 +368,11 @@ def register(mcp: FastMCP) -> None:
                 result["results"] = dump_results(matches, opt(fields))
                 result["count"] = len(matches)
                 result["total_count"] = None
-                result["next_page_results"] = None
-                result["prev_page_results"] = None
-                result["filter_complete"] = response.next_cursor is None
+                has_next_page = bool(response.next_page_results)
+                result["next_cursor"] = response.next_cursor if has_next_page else None
+                result["next_page_results"] = has_next_page
+                result["prev_page_results"] = bool(response.prev_page_results)
+                result["filter_complete"] = not has_next_page
                 result["assignee_id"] = assignee_id
             return result
 
