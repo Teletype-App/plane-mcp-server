@@ -78,6 +78,13 @@ def test_list_mine_keeps_a_cursor_only_when_plane_reports_another_page(registere
     assert result["next_page_results"] is True
 
 
+def test_list_mine_description_tells_agents_when_to_stop(registered):
+    description = registered["workitem"].description
+
+    assert "stop when filter_complete=true" in description
+    assert "request next_cursor only when filter_complete=false" in description
+
+
 def test_explicit_assignee_avoids_a_profile_request(registered, spy):
     spy.returns["work_items.list"] = _page()
 

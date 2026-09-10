@@ -123,6 +123,29 @@ workitem(action="count", pql='assignees__id = "<member id>"', group_by="state_id
 
 Call `get_pql_reference` for the full syntax, operators and worked examples.
 
+#### Authenticated user's work items on self-hosted Plane
+
+Some self-hosted Plane versions do not apply PQL or structured assignee/state
+filters to list requests. Use `list_mine` when that is the case:
+
+```python
+workitem(
+    action="list_mine",
+    project_id="<project id>",
+    state_id="<column/state id>",
+    per_page=100,
+)
+```
+
+`list_mine` filters the returned API page locally by the authenticated user and,
+when supplied, `state_id`. Stop as soon as `filter_complete` is `true`; at that
+point `next_cursor` is `null`, including when Plane returned a synthetic cursor
+for its last page. Request `next_cursor` only when `filter_complete` is `false`.
+
+Without `assignee_id`, the first call makes one request to identify the current
+user and one request to list a page. Passing a known `assignee_id` avoids the
+profile request. Each real additional page requires one more list request.
+
 ### Upgrading from the per-operation tools
 
 Earlier releases exposed one tool per API operation. **Existing integrations keep

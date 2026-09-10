@@ -85,8 +85,9 @@ ACTIONS = (
         ("project_id",),
         ("assignee_id", "state_id", *QUERY_FIELDS),
         note=(
-            "returns only the authenticated user's tasks from one API page and optionally narrows by state_id; "
-            "follow next_cursor until filter_complete is true"
+            "filters one Plane API page to the authenticated user's tasks and optionally to state_id; "
+            "stop when filter_complete=true and request next_cursor only when filter_complete=false. "
+            "Without assignee_id, resolving the authenticated user costs one additional API request"
         ),
         read=True,
     ),
