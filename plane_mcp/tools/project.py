@@ -5,17 +5,19 @@ from __future__ import annotations
 from typing import Literal, get_args
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.enums import TimezoneEnum
 from plane.models.projects import (
     CreateProject,
     PaginatedProjectLiteResponse,
     PaginatedProjectMemberResponse,
+    PaginatedProjectResponse,
     Project,
     ProjectFeature,
     ProjectWorklogSummary,
     UpdateProject,
 )
-from plane.models.query_params import ProjectLiteListQueryParams
+from plane.models.query_params import PaginatedQueryParams, ProjectLiteListQueryParams
 
 from plane_mcp.client import get_plane_client_context
 from plane_mcp.toolkit import Action, build_annotations, build_description, missing, needs, opt, plan_gated, rich_text
@@ -174,6 +176,7 @@ def register(mcp: FastMCP) -> None:
     ) -> (
         Project
         | PaginatedProjectLiteResponse
+        | PaginatedProjectResponse
         | PaginatedProjectMemberResponse
         | ProjectFeature
         | list[ProjectWorklogSummary]
@@ -189,15 +192,27 @@ def register(mcp: FastMCP) -> None:
         zone: TimezoneEnum | None = timezone or None  # type: ignore[assignment]
 
         if action == "list":
-            return client.projects.list_lite(
-                workspace_slug=workspace_slug,
-                params=ProjectLiteListQueryParams(
-                    cursor=opt(cursor),
-                    per_page=per_page or DEFAULT_PER_PAGE,
-                    order_by=opt(order_by),
-                    include_archived=False,
-                ),
-            )
+            try:
+                return client.projects.list_lite(
+                    workspace_slug=workspace_slug,
+                    params=ProjectLiteListQueryParams(
+                        cursor=opt(cursor),
+                        per_page=per_page or DEFAULT_PER_PAGE,
+                        order_by=opt(order_by),
+                        include_archived=False,
+                    ),
+                )
+            except HttpError as exc:
+                if exc.status_code != 404:
+                    raise
+                return client.projects.list(
+                    workspace_slug=workspace_slug,
+                    params=PaginatedQueryParams(
+                        cursor=opt(cursor),
+                        per_page=per_page or DEFAULT_PER_PAGE,
+                        order_by=opt(order_by),
+                    ),
+                )
 
         if action == "create":
             if error := needs(action, name=name, identifier=identifier):

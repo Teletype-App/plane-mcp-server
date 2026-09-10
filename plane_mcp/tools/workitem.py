@@ -35,6 +35,7 @@ from plane_mcp.toolkit import (
     build_annotations,
     build_description,
     coerce_list,
+    dump_results,
     envelope,
     ids_of,
     missing,
@@ -75,11 +76,26 @@ QUERY_FIELDS = ("order_by", "per_page", "cursor", "expand", "fields", "external_
 ACTIONS = (
     Action(
         "list",
-        optional=("project_id", "pql", *QUERY_FIELDS),
+        optional=("project_id", "pql", "assignee_id", "state_id", *QUERY_FIELDS),
         note="omit project_id to search the whole workspace",
         read=True,
     ),
-    Action("list_archived", ("project_id",), ("pql", *QUERY_FIELDS), read=True),
+    Action(
+        "list_mine",
+        ("project_id",),
+        ("assignee_id", "state_id", *QUERY_FIELDS),
+        note=(
+            "returns only the authenticated user's tasks from one API page and optionally narrows by state_id; "
+            "follow next_cursor until filter_complete is true"
+        ),
+        read=True,
+    ),
+    Action(
+        "list_archived",
+        ("project_id",),
+        ("pql", "assignee_id", "state_id", *QUERY_FIELDS),
+        read=True,
+    ),
     Action(
         "retrieve",
         ("project_id", "workitem_id"),
@@ -141,6 +157,7 @@ GROUP_BY_VALUES = (
     "start_date",
 )
 
+
 FOOTER = (
     f"priority: {', '.join(PRIORITIES)}.\n"
     "UUID fields (assignees, labels, state, parent, type_id) need UUIDs -- list the relevant "
@@ -177,6 +194,36 @@ def _scoped_pql(pql: str, project_id: str) -> str:
     return f"({pql}) AND {scope}" if pql else scope
 
 
+def _with_fields(value: str, *required: str) -> str:
+    """Add fields needed for local compatibility filtering without duplicates."""
+    fields = [part.strip() for part in value.split(",") if part.strip()]
+    for field in required:
+        if field not in fields:
+            fields.append(field)
+    return ",".join(fields)
+
+
+def _related_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("id")
+    return getattr(value, "id", None)
+
+
+def _mine_on_page(items: Any, assignee_id: str, state_id: str) -> list[Any]:
+    """Filter one Plane page without issuing a retrieve call per work item."""
+    matches = []
+    for item in items or []:
+        assignees = getattr(item, "assignees", []) or []
+        if assignee_id not in {_related_id(assignee) for assignee in assignees}:
+            continue
+        if state_id and _related_id(getattr(item, "state", None)) != state_id:
+            continue
+        matches.append(item)
+    return matches
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name=NAME,
@@ -186,6 +233,7 @@ def register(mcp: FastMCP) -> None:
     def workitem(  # noqa: PLR0911, PLR0912 - one branch per action is the point
         action: Literal[
             "list",
+            "list_mine",
             "list_archived",
             "retrieve",
             "retrieve_by_identifier",
@@ -203,6 +251,8 @@ def register(mcp: FastMCP) -> None:
         workitem_identifier: str = "",
         query: str = "",
         pql: Annotated[str, Field(description=PQL_FIELD_HINT)] = "",
+        assignee_id: str = "",
+        state_id: str = "",
         group_by: str = "",
         sub_group_by: str = "",
         name: str = "",
@@ -272,16 +322,27 @@ def register(mcp: FastMCP) -> None:
                 "estimate_point": opt(estimate_point),
             }
 
-        if action in ("list", "list_archived"):
+        if action in ("list", "list_mine", "list_archived"):
             if action == "list_archived" and not project_id:
                 return missing(action, "project_id")
+            if action == "list_mine" and not project_id:
+                return missing(action, "project_id")
+            if action == "list_mine":
+                assignee_id = assignee_id or client.users.get_me().id or ""
+                if not assignee_id:
+                    return "Error: Plane returned the authenticated user without an id."
+            request_fields = fields
+            request_expand = expand
+            if action == "list_mine":
+                request_fields = _with_fields(fields, "assignees", "state") if fields else fields
+                request_expand = _with_fields(expand, "assignees", "state")
             params = WorkItemQueryParams(
                 pql=opt(pql),
                 order_by=opt(order_by),
                 per_page=opt(per_page),
                 cursor=opt(cursor),
-                expand=opt(expand),
-                fields=opt(fields),
+                expand=opt(request_expand),
+                fields=opt(request_fields),
                 external_id=opt(external_id),
                 external_source=opt(external_source),
             )
@@ -301,7 +362,17 @@ def register(mcp: FastMCP) -> None:
                 if failure:
                     return failure
                 raise
-            return envelope(response, opt(fields))
+            result = envelope(response, opt(fields))
+            if action == "list_mine":
+                matches = _mine_on_page(response.results, assignee_id, state_id)
+                result["results"] = dump_results(matches, opt(fields))
+                result["count"] = len(matches)
+                result["total_count"] = None
+                result["next_page_results"] = None
+                result["prev_page_results"] = None
+                result["filter_complete"] = response.next_cursor is None
+                result["assignee_id"] = assignee_id
+            return result
 
         if action == "count":
             scoped = _scoped_pql(pql, project_id)

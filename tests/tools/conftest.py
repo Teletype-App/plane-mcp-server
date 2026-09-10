@@ -7,6 +7,7 @@ import os
 
 import pytest
 from fastmcp import FastMCP
+from plane.models.users import UserLite
 
 os.environ.setdefault("PLANE_API_KEY", "test")
 os.environ.setdefault("PLANE_WORKSPACE_SLUG", "test")
@@ -75,6 +76,7 @@ def spy(monkeypatch):
     # Resources gated on a workspace feature probe it first; answer yes so the
     # dispatch under test is what gets exercised.
     client.returns["workspaces.get_features"] = _AllFeaturesOn()
+    client.returns["users.get_me"] = UserLite(id="me")
     for mod in RESOURCES:
         if hasattr(mod, "get_plane_client_context"):
             monkeypatch.setattr(mod, "get_plane_client_context", lambda: (client, "acme"))

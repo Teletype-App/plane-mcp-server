@@ -50,6 +50,9 @@ class ValidateActionArguments(Middleware):
             # A retired name, or not ours at all. Either way not our business.
             return None
         if "action" not in arguments:
+            if len(by_action) == 1:
+                # A one-operation tool deliberately has no action parameter.
+                return None
             # Pydantic names the parameter but not one permitted value, so a caller
             # that omitted the choice learns nothing it did not already know.
             return missing_action_error(tool, by_action)
